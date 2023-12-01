@@ -1,0 +1,460 @@
+---
+title: "A global decline in intimate partner violence against women"
+author: "Irina Vartanova, Pontus Strimling, Kimmo Eriksson"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 7.1, fig.height = 3.15, 
+                      out.width = "60%", fig.align = 'center',
+                      dpi = 300, dev="jpeg", tidy = TRUE)
+
+library(tidyverse)
+library(ggrepel)
+library(cowplot)
+library(kableExtra)
+library(broom)
+
+theme_set(theme_classic(base_size = 13))
+
+dhs <- read_rds("../data/aggr-data-clean.rds")
+
+sample_size <- read_rds("../data/sample-size.rds")
+
+dhs_ts <- dhs %>% 
+  group_by(sample, item, country) %>% 
+  filter(n_distinct(year) > 1) %>% 
+  ungroup()
+
+undp_data <- read_csv("https://hdr.undp.org/sites/default/files/2021-22_HDR/HDR21-22_Composite_indices_complete_time_series.csv")
+
+hdi_data <- undp_data %>% 
+  select(iso3:region, hdi_1990:hdi_2021) %>% 
+  pivot_longer(c(-iso3:-region), 
+               names_to = "year", 
+               values_to = "hdi") %>% 
+  mutate(year = str_replace_all(year, "hdi_", ""),
+         year = as.numeric(year))
+
+hdi_data <- hdi_data %>% 
+  mutate(country = str_replace_all(country, c(
+    "Bolivia \\(Plurinational State of\\)" = "Bolivia",
+    "Congo \\(Democratic Republic of the\\)" = "Congo Democratic Republic",
+    "Côte d'Ivoire" = "Cote d'Ivoire",
+    "Tanzania \\(United Republic of\\)" = "Tanzania",
+    "Moldova \\(Republic of\\)" = "Moldova",
+    "Kyrgyzstan" = "Kyrgyz Republic",
+    "Eswatini \\(Kingdom of\\)" = "Eswatini"
+  )))
+
+```
+
+
+```{r pierroti_sample}
+
+pierotti_data <- dhs %>% 
+  filter(sample == "women", type == "attitudes", year < 2011,
+         # Pierotty did not use Armenia 2000
+         !(country == "Armenia" & year == 2000),
+         !(country == "Zimbabwe" & year == 2010),
+         !(country == "Malawi" & year == 2010), 
+         !(country == "Rwanda" & year == 2010), 
+         # looks like Pierotti missed Lesotho because it is not mentioned
+         ! country %in% c("Lesotho", "Burkina Faso")) %>% 
+  group_by(country) %>% 
+  # Pierotti used India 1999 and Turkey 1998 that had different wordings
+  filter(n_distinct(year) == 2|country == "India") %>% 
+  distinct(country, year)
+
+```
+
+```{r functions}
+
+get_lm_coef <- function(data){
+  m <- lm(value ~ year, data)
+  coef(m)["year"]*100
+}
+
+
+```
+
+# Methods
+
+```{r}
+
+sample_size %>% 
+  summarise(min(year), max(year))
+
+sample_size %>% 
+  summarise(sum(n_both), n_distinct(country))
+
+sample_size %>% 
+  drop_na(n_men) %>% 
+  summarise(sum(n_men), n_distinct(country))
+
+
+
+```
+
+
+
+# Results
+
+## A Global Decline in IPVAW
+
+```{r}
+
+dhs_nest <- dhs_ts %>% 
+  filter(item %in% c("beat_any", "dvp_any_12m")) %>% 
+  group_by(sample, type, item, country) %>% 
+  nest()
+
+dhs_time_est <- dhs_nest %>% 
+  mutate(slope = map_dbl(data, get_lm_coef)) %>% 
+  select(-data) %>% 
+  ungroup()
+
+dhs_change_est <- dhs_time_est %>% 
+  mutate(measure = case_when(
+    item == "dvp_any_12m" ~ "Prevalence of IPVAW", 
+    sample == "men" ~ "Men’s acceptance of IPVAW",
+    TRUE ~ "Women’s acceptance of IPVAW"
+  ),
+  measure = fct_relevel(measure, "Prevalence of IPVAW", "Women’s acceptance of IPVAW")) 
+
+```
+
+
+```{r}
+
+dhs_change_est %>% 
+  group_by(measure) %>% 
+  summarise(n = n(), 
+            neg = sum(slope < 0),
+            neg/n,
+            mean = mean(slope), 
+            se = sd(slope)/sqrt(n()-1), 
+            lower = mean + 1.96*se,
+            upper = mean - 1.96*se)
+
+```
+
+
+
+
+```{r fig1, ,fig.width=7, fig.height=4, fig.cap= "Figure 1. Estimated time trends, in percentage points per year, for (A) the prevalence of IPVAW in 31 countries, (B) women’s acceptance of IPVAW in 46 countries, and (C) men’s"}
+
+dhs_change_est %>% 
+  ggplot(aes(measure, slope)) +
+  geom_hline(yintercept = 0, color = "grey30") +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_point(position = position_jitter(width = .1), alpha = .5, size = 2) +
+  labs(x = NULL, y = "Change rate") 
+
+# ggsave("fig1_change-rate.pdf", width = 7, height = 4)
+
+
+```
+
+
+#### Compare before and after Pierotti
+
+```{r}
+
+pierotti_data_last <- pierotti_data %>% 
+  group_by(country) %>% 
+  filter(n() == 2, 
+         year == max(year),
+         # Exclude Bolivia because there is no data after Pierotti
+         country != "Bolivia"
+         ) %>% 
+  rename(last_pierotti_year = year)
+
+dhs_pier <- dhs_ts %>% 
+  filter(sample == "women", item == "beat_any") %>% 
+  left_join(pierotti_data_last) %>% 
+  drop_na(last_pierotti_year) 
+
+
+dhs_compare <- bind_rows(
+dhs_pier %>% 
+  filter(year <= last_pierotti_year) %>% 
+  mutate(period = "pierotti"),
+dhs_pier %>% 
+  filter(year >= last_pierotti_year) %>% 
+  mutate(period = "after pierotti")
+)
+
+
+dhs_comp_nest <- dhs_compare %>% 
+  group_by(period, country) %>% 
+  nest()
+
+dhs_comp_time_est <- dhs_comp_nest %>% 
+  mutate(slope = map_dbl(data, get_lm_coef)) %>% 
+  select(-data) %>% 
+  ungroup()
+
+dhs_comp_time_est %>% 
+  group_by(period) %>% 
+  summarise(n = n(), 
+            neg = sum(slope < 0),
+            neg/n,
+            mean = mean(slope), 
+            se = sd(slope)/sqrt(n()-1), 
+            lower = mean + 1.96*se,
+            upper = mean - 1.96*se) 
+
+```
+
+
+
+## Between-Operationalization Consistency of Trends
+### Consistency across  items
+
+```{r tbl1}
+
+dhs_items_nest <- dhs_ts %>% 
+  filter(sample == "women", type == "attitudes", item != "beat_any") %>% 
+  group_by(sample, type, item, country) %>% 
+  nest()
+
+compare_att_items <- dhs_items_nest %>% 
+  mutate(slope = map_dbl(data, get_lm_coef)) %>% 
+  ungroup() %>% 
+  select(-data, -sample, -type) %>% 
+  arrange(item) %>% 
+  pivot_wider(names_from = item, values_from = slope) 
+
+corr_tble <- compare_att_items %>% 
+  select(-country) %>% 
+  cor(use = "pair") %>% 
+  round(2) 
+
+means <-  compare_att_items %>% 
+  select(-country) %>% 
+  map_dbl(~round(mean(.), 2))
+
+corr_tble[upper.tri(corr_tble)] <- ""
+
+for(i in 1:5){
+  corr_tble[i, i] <- means[i]
+}
+  
+kbl(corr_tble, caption = "Table 1. Correlation table showing consistency in time trends per country in women’s acceptance of intimate partner violence across contexts.") %>% 
+  kable_classic(full_width = FALSE)
+
+```
+
+
+### Consistency across samples
+
+```{r}
+
+# Select periods with both attitudes among women and men
+dhs_gender_nest <- dhs_ts %>% 
+  filter(item == "beat_any") %>% 
+  group_by(country, year) %>%
+  filter(n() == 2) %>% 
+  group_by(country, sample) %>% 
+  nest()
+
+dhs_gender_time_est <- dhs_gender_nest %>% 
+  mutate(slope = map_dbl(data, get_lm_coef)) %>% 
+  select(-data) %>% 
+  ungroup()
+
+
+compare_sample <- dhs_gender_time_est %>% 
+  pivot_wider(names_from = sample, values_from = slope) %>% 
+  drop_na() 
+
+cor.test(compare_sample$women, compare_sample$men) %>% 
+  tidy() 
+
+```
+
+
+### Consistency between attitudes and experience
+
+
+```{r}
+
+# Select periods with both attitudes and experience measured
+dhs_dvp_nest <- dhs_ts %>% 
+  filter(item == "beat_any") %>% 
+  inner_join(dhs_ts %>% 
+               filter(item == "dvp_any_12m") %>% 
+               select(country, year, dvp_value = value) %>% 
+               group_by(country) %>% 
+               filter(n_distinct(year) > 1)) %>% 
+  group_by(country, sample) %>%
+  filter(n() > 1) %>% 
+  group_by(country, sample) %>% 
+  nest()
+
+get_lm_dvp <- function(data){
+  m <- lm(dvp_value ~ year, data)
+  coef(m)["year"]*100
+}
+
+dhs_dvp_time_est <- dhs_dvp_nest %>% 
+  mutate(slope = map_dbl(data, get_lm_coef),
+         dvp_slope = map_dbl(data, get_lm_dvp)) %>% 
+  select(-data) %>% 
+  ungroup()
+
+dhs_dvp_time_est <- left_join(dhs_dvp_time_est, hdi_data %>% distinct(country, iso3))
+
+dhs_dvp_time_est %>% 
+  group_by(sample) %>% 
+  summarise(tidy(cor.test(slope, dvp_slope))) 
+
+```
+
+
+```{r fig2, fig.width = 8, fig.height=4, fig.cap="Figure 2. Scatterplots of estimated time trends (in percentage points per year) for the prevalence of IPVAW and acceptance of IPVAW among (A) women and (B) men."}
+
+pl_women <- dhs_dvp_time_est %>% 
+  filter(sample == "women") %>% 
+  ggplot(aes(slope, dvp_slope)) +
+  geom_vline(xintercept = 0, color = "grey40") +
+  geom_hline(yintercept = 0, color = "grey40") +
+  geom_smooth(method = "lm", color = "midnightblue") +
+  geom_point() +
+  geom_text_repel(aes(label = iso3), size = 3) + 
+  labs(x = "Trends in acceptance of IPVAW among women", 
+       y = "Trends prevalence of IPVAW") + 
+  ylim(-4.23, 1.72) +
+  theme(axis.title.x = element_text(size = 12)) +
+  panel_border()
+
+pl_men <- dhs_dvp_time_est %>% 
+  filter(sample == "women") %>% 
+  ggplot(aes(slope, dvp_slope)) +
+  geom_vline(xintercept = 0, color = "grey40") +
+  geom_hline(yintercept = 0, color = "grey40") +
+  geom_smooth(method = "lm", color = "midnightblue") +
+  geom_point() +
+  geom_text_repel(aes(label = iso3), size = 3) + 
+  labs(x = "Trends acceptance of IPVAW among men", 
+       y = "Trends prevalence of IPVAW") + 
+  ylim(-4.23, 1.72) +
+  theme(axis.title.x = element_text(size = 12)) +
+  panel_border()
+
+
+plot_grid(pl_women, pl_men, labels = "AUTO")
+
+# ggsave("fig2_dvp-by-attitudes.pdf", width = 8, height = 4)
+
+
+```
+
+```{r}
+
+dhs_dvp_time_est %>% 
+  filter(!iso3 %in% c("COD", "SLE", "TLS", "MOZ")) %>% 
+  group_by(sample) %>% 
+  summarise(tidy(cor.test(slope, dvp_slope))) 
+
+
+```
+
+
+## The Relationship Between Living Standards and Acceptance of IPVAW
+
+
+```{r}
+
+dhs_levels <- dhs %>% 
+  filter(item == "beat_any") %>% 
+  group_by(country, sample) %>% 
+  filter(year == min(year)) %>% 
+  rename(beat_any = value)
+
+# Use earlier years for HDI for the following countries
+# country == "Burkina Faso" ~ 1999,
+# country == "Ethiopia" ~ 2000,
+# country == "Nigeria" ~ 2003,
+
+hdi_data_sub <- hdi_data %>% 
+  filter(country %in% dhs_levels$country, 
+         year >= 1994) %>% 
+  group_by(country) %>% 
+  fill(hdi, .direction = "up")
+
+dhs_hdi_comb <- dhs_levels %>% 
+  mutate(year = year - 5) %>%
+  left_join(hdi_data_sub)
+
+dhs_hdi_comb %>% 
+  group_by(sample) %>% 
+  summarise(tidy(cor.test(beat_any, hdi))) 
+
+```
+
+
+
+
+### HDI change
+
+```{r}
+
+ts_period <-  dhs_ts %>% 
+  filter(item == "beat_any") %>% 
+  group_by(country, sample) %>% 
+  summarise(min = min(year), 
+            max = max(year))
+
+hdi_lag_ts <- right_join(hdi_data, ts_period) %>% 
+  filter(year >= min - 5, year <= max - 5)
+
+hdi_lag_nest <- hdi_lag_ts %>% 
+  group_by(country, sample) %>% 
+  nest()
+
+get_coef <- function(data){
+  m <- lm(hdi ~ year, data)
+  coef(m)["year"]
+}
+
+hdi_time_est_lag <- hdi_lag_nest %>% 
+  mutate(hdi_lag_slope = map_dbl(data, get_coef)) %>% 
+  select(-data)
+
+dhs_hdi_change_comb <- dhs_time_est %>% 
+  filter(item == "beat_any") %>% 
+  select(country, sample, slope) %>% 
+  left_join(hdi_time_est_lag)
+
+dhs_hdi_change_comb %>% 
+  group_by(sample) %>% 
+  summarise(tidy(cor.test(slope, hdi_lag_slope))) 
+
+
+```
+
+
+# Supplementary Materials
+
+## Suplementary table 1
+
+```{r}
+
+sample_size <- sample_size %>% 
+  mutate(across(starts_with("n_"), ~ifelse(is.na(.), "-", format(., big.mark = ","))))
+
+sample_size %>% 
+  select(-n_both) %>% 
+  kbl(col.names = c("Country", "Year", "N prevalence", "N acceptance", "N acceptance")) %>%
+  add_header_above(c(" " = 2, "Women" = 2, "Men" = 1)) %>% 
+  kable_classic(full_width = FALSE)
+
+```
+
+
